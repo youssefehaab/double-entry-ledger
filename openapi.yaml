@@ -1,0 +1,400 @@
+openapi: 3.1.0
+info:
+  title: Double-Entry Ledger API
+  description: "A double-entry ledger service. Every transaction is a balanced set\
+    \ of DEBIT/CREDIT entries (sum(DEBIT) == sum(CREDIT)), enforced both at the application\
+    \ level and, as the ultimate backstop, by a PostgreSQL deferred constraint trigger.\
+    \ Entries are append-only; account balances are always derived from entries, never\
+    \ stored."
+  contact:
+    name: Ledger Service Team
+  license:
+    name: Proprietary
+  version: 0.2.0
+servers:
+- url: http://localhost:8099
+  description: Generated server url
+tags:
+- name: Transactions
+  description: Posting and retrieving balanced double-entry transactions
+- name: Accounts
+  description: "Chart-of-accounts and derived account state (balance, entries)"
+paths:
+  /transactions:
+    post:
+      tags:
+      - Transactions
+      summary: Create and post a balanced transaction
+      description: "Validates that entries balance (422 if not) and that every referenced\
+        \ account exists (404 if not), then atomically creates the transaction (status\
+        \ POSTED) and its entries. Idempotent via the required Idempotency-Key header:\
+        \ replaying the same key with the same body returns the original result (200)\
+        \ without reprocessing; reusing the same key with a different body returns\
+        \ 409."
+      operationId: createTransaction
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        description: Client-supplied key that makes this request safely retryable.
+          Required.
+        required: true
+        schema:
+          type: string
+          maxLength: 255
+          minLength: 0
+        example: 3f2b9c6e-6f1a-4c9d-9a7b-1e2d3c4b5a6f
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTransactionRequest"
+        required: true
+      responses:
+        "201":
+          description: Transaction created and posted
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/TransactionResponse"
+        "200":
+          description: "Idempotent replay: identical request already processed under\
+            \ this key"
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/TransactionResponse"
+        "400":
+          description: "Missing/blank Idempotency-Key header, or request body validation\
+            \ failed"
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: One or more referenced account_ids do not exist
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Idempotency-Key was already used with a different request body
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Entries do not balance (sum(DEBIT) != sum(CREDIT))
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /accounts:
+    post:
+      tags:
+      - Accounts
+      summary: Create an account
+      description: "Not idempotent: retrying this request creates a second, distinct\
+        \ account (see AccountService javadoc). There is no client-supplied idempotency\
+        \ key for account creation in this phase."
+      operationId: createAccount
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAccountRequest"
+        required: true
+      responses:
+        "201":
+          description: Account created
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/AccountResponse"
+        "400":
+          description: "Validation failed (blank name, malformed currency, unknown\
+            \ accountType)"
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /transactions/{id}:
+    get:
+      tags:
+      - Transactions
+      summary: Get a transaction and its entries
+      operationId: getTransaction
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        "200":
+          description: Transaction found
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/TransactionResponse"
+        "404":
+          description: No transaction with this id
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /accounts/{id}/entries:
+    get:
+      tags:
+      - Accounts
+      summary: "List an account's entries, paginated"
+      description: Ordered by created_at then id (stable/deterministic pagination).
+        Only page/size are honored from the query string; sort order is fixed.
+      operationId: getEntries
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: pageable
+        in: query
+        description: Zero-based page index and page size
+        required: true
+        schema:
+          $ref: "#/components/schemas/Pageable"
+      responses:
+        "200":
+          description: Page of entries
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/PagedEntriesResponse"
+        "404":
+          description: No account with this id
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /accounts/{id}/balance:
+    get:
+      tags:
+      - Accounts
+      summary: Get an account's current balance
+      description: "Always computed on the fly by summing the account's entries -\
+        \ there is no stored balance column. Sign convention: DEBIT entries add to\
+        \ the balance, CREDIT entries subtract from it (\"debit-positive\"), independent\
+        \ of account_type."
+      operationId: getBalance
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        "200":
+          description: Balance computed
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/BalanceResponse"
+        "404":
+          description: No account with this id
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+components:
+  schemas:
+    CreateTransactionRequest:
+      type: object
+      description: Request to create and post a balanced double-entry transaction
+      properties:
+        description:
+          type: string
+          example: "Invoice #1042 payment"
+          minLength: 1
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/EntryRequest"
+          minItems: 1
+      required:
+      - description
+      - entries
+    EntryRequest:
+      type: object
+      description: A single debit or credit posting against an account
+      properties:
+        accountId:
+          type: string
+          format: uuid
+          description: Account this entry posts against
+        amount:
+          type: number
+          description: "Unsigned amount; sign is carried by direction, not the amount\
+            \ itself"
+          example: 100.0
+          exclusiveMinimum: 0
+        direction:
+          type: string
+          enum:
+          - DEBIT
+          - CREDIT
+      required:
+      - accountId
+      - amount
+      - direction
+    ErrorResponse:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        status:
+          type: integer
+          format: int32
+        error:
+          type: string
+        messages:
+          type: array
+          items:
+            type: string
+    EntryResponse:
+      type: object
+      description: "A single, immutable debit or credit posting"
+      properties:
+        id:
+          type: string
+          format: uuid
+        transactionId:
+          type: string
+          format: uuid
+        accountId:
+          type: string
+          format: uuid
+        amount:
+          type: number
+        direction:
+          type: string
+          enum:
+          - DEBIT
+          - CREDIT
+        createdAt:
+          type: string
+          format: date-time
+    TransactionResponse:
+      type: object
+      description: A posted transaction and its balanced entries
+      properties:
+        id:
+          type: string
+          format: uuid
+        description:
+          type: string
+        status:
+          type: string
+          enum:
+          - PENDING
+          - POSTED
+          - FAILED
+        createdAt:
+          type: string
+          format: date-time
+        postedAt:
+          type: string
+          format: date-time
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/EntryResponse"
+    CreateAccountRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+        currency:
+          type: string
+          minLength: 1
+          pattern: "^[A-Za-z]{3}$"
+        accountType:
+          type: string
+          enum:
+          - ASSET
+          - LIABILITY
+          - EQUITY
+      required:
+      - accountType
+      - currency
+      - name
+    AccountResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        currency:
+          type: string
+        accountType:
+          type: string
+          enum:
+          - ASSET
+          - LIABILITY
+          - EQUITY
+        createdAt:
+          type: string
+          format: date-time
+    Pageable:
+      type: object
+      properties:
+        page:
+          type: integer
+          format: int32
+          minimum: 0
+        size:
+          type: integer
+          format: int32
+          minimum: 1
+        sort:
+          type: array
+          items:
+            type: string
+    PagedEntriesResponse:
+      type: object
+      description: "A page of entries for an account, ordered by created_at then id"
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/EntryResponse"
+        page:
+          type: integer
+          format: int32
+        size:
+          type: integer
+          format: int32
+        totalElements:
+          type: integer
+          format: int64
+        totalPages:
+          type: integer
+          format: int32
+    BalanceResponse:
+      type: object
+      description: "An account's balance, computed on the fly by summing its entries\
+        \ (debit-positive: DEBIT adds, CREDIT subtracts)"
+      properties:
+        accountId:
+          type: string
+          format: uuid
+        balance:
+          type: number
+        asOf:
+          type: string
+          format: date-time

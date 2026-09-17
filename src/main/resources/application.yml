@@ -1,0 +1,45 @@
+spring:
+  application:
+    name: double-entry-ledger
+
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:ledger}
+    username: ${DB_USERNAME:ledger}
+    password: ${DB_PASSWORD:ledger}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      pool-name: ledger-pool
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:10}
+      minimum-idle: ${DB_POOL_MIN_IDLE:2}
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      # Schema is owned exclusively by Flyway migrations. Hibernate only ever
+      # validates that the JPA mapping matches the migrated schema - it must
+      # never create/alter tables, since that would bypass the DB-level
+      # constraints (triggers, checks) defined in the migrations.
+      ddl-auto: validate
+    properties:
+      hibernate:
+        format_sql: true
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+
+server:
+  port: ${SERVER_PORT:8080}
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+logging:
+  level:
+    org.flywaydb: INFO

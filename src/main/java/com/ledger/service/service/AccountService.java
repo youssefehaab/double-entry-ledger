@@ -35,7 +35,11 @@ public class AccountService {
                 normalizeCurrency(request.currency()),
                 request.accountType()
         );
-        Account saved = accountRepository.save(account);
+        // saveAndFlush (not save): forces the INSERT immediately so the
+        // DB/Hibernate-generated createdAt (@CreationTimestamp) is populated
+        // on the entity before we map it to the response, instead of
+        // staying null until the surrounding transaction eventually flushes.
+        Account saved = accountRepository.saveAndFlush(account);
         return AccountResponse.from(saved);
     }
 

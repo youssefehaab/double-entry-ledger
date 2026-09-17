@@ -19,7 +19,7 @@ public record CreateAccountRequest(
         String name,
 
         @NotBlank(message = "currency must not be blank")
-        @Pattern(regexp = "^[A-Z]{3}$", message = "currency must be a 3-letter uppercase ISO 4217 code")
+        @Pattern(regexp = "^[A-Za-z]{3}$", message = "currency must be a 3-letter ISO 4217 code")
         String currency,
 
         @NotNull(message = "accountType must be one of ASSET, LIABILITY, EQUITY")

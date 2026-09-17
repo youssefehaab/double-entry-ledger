@@ -44,6 +44,8 @@ public class AccountController {
     @ApiResponse(responseCode = "201", description = "Account created")
     @ApiResponse(responseCode = "400", description = "Validation failed (blank name, malformed currency, unknown accountType)",
             content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
+    @ApiResponse(responseCode = "415", description = "Content-Type is not application/json",
+            content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
     public ResponseEntity<AccountResponse> createAccount(@Valid @RequestBody CreateAccountRequest request) {
         AccountResponse response = accountService.createAccount(request);
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
@@ -55,6 +57,8 @@ public class AccountController {
                     + "stored balance column. Sign convention: DEBIT entries add to the balance, CREDIT "
                     + "entries subtract from it (\"debit-positive\"), independent of account_type.")
     @ApiResponse(responseCode = "200", description = "Balance computed")
+    @ApiResponse(responseCode = "400", description = "{id} is not a valid UUID",
+            content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
     @ApiResponse(responseCode = "404", description = "No account with this id",
             content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
     public BalanceResponse getBalance(@PathVariable UUID id) {
@@ -66,6 +70,8 @@ public class AccountController {
             description = "Ordered by created_at then id (stable/deterministic pagination). "
                     + "Only page/size are honored from the query string; sort order is fixed.")
     @ApiResponse(responseCode = "200", description = "Page of entries")
+    @ApiResponse(responseCode = "400", description = "{id} is not a valid UUID",
+            content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
     @ApiResponse(responseCode = "404", description = "No account with this id",
             content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
     public PagedEntriesResponse getEntries(

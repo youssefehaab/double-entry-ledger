@@ -104,6 +104,30 @@ class AccountBalanceAndEntriesIntegrationTest extends AbstractIntegrationTest {
                 .andExpect(jsonPath("$.error").value("Account Not Found"));
     }
 
+    /**
+     * Phase 4 bugfix A: a non-UUID {id} previously reached an unhandled
+     * {@code MethodArgumentTypeMismatchException} and fell through to the
+     * generic {@code Exception.class} handler, returning an undocumented
+     * 500 (found by the black-box api-tests suite). {@code
+     * GlobalExceptionHandler#handleTypeMismatch} now maps it to a clean 400.
+     */
+    @Test
+    void getBalance_malformedUuidReturns400NotA500() throws Exception {
+        mockMvc.perform(get("/accounts/{id}/balance", "not-a-uuid"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.error").value("Malformed Request"));
+    }
+
+    /** Same bugfix as {@link #getBalance_malformedUuidReturns400NotA500()}, for the entries endpoint. */
+    @Test
+    void getEntries_malformedUuidReturns400NotA500() throws Exception {
+        mockMvc.perform(get("/accounts/{id}/entries", "not-a-uuid"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.error").value("Malformed Request"));
+    }
+
     @Test
     void getEntries_returnsPaginatedResultsWithMetadata() throws Exception {
         // 5 transactions => 5 entries against cashAccountId (one leg each).

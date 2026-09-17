@@ -65,7 +65,9 @@ public class TransactionController {
                     + "without reprocessing; reusing the same key with a different body returns 409.")
     @ApiResponse(responseCode = "201", description = "Transaction created and posted")
     @ApiResponse(responseCode = "200", description = "Idempotent replay: identical request already processed under this key")
-    @ApiResponse(responseCode = "400", description = "Missing/blank Idempotency-Key header, or request body validation failed",
+    @ApiResponse(responseCode = "400", description = "Missing/blank Idempotency-Key header, or request body "
+            + "validation failed (including an entry amount that is non-positive or exceeds the "
+            + "supported precision/scale of 15 integer and 4 fraction digits)",
             content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
     @ApiResponse(responseCode = "404", description = "One or more referenced account_ids do not exist",
             content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
@@ -89,6 +91,8 @@ public class TransactionController {
     @GetMapping("/{id}")
     @Operation(summary = "Get a transaction and its entries")
     @ApiResponse(responseCode = "200", description = "Transaction found")
+    @ApiResponse(responseCode = "400", description = "{id} is not a valid UUID",
+            content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
     @ApiResponse(responseCode = "404", description = "No transaction with this id",
             content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
     public TransactionResponse getTransaction(@PathVariable UUID id) {

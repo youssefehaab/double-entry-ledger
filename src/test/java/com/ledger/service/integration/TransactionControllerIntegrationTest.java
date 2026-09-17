@@ -248,6 +248,57 @@ class TransactionControllerIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
+     * Phase 4 bugfix A: a non-UUID {id} previously reached an unhandled
+     * {@code MethodArgumentTypeMismatchException} and fell through to the
+     * generic {@code Exception.class} handler, returning an undocumented
+     * 500 (found by the black-box api-tests suite). {@code
+     * GlobalExceptionHandler#handleTypeMismatch} now maps it to a clean 400.
+     */
+    @Test
+    void getTransaction_malformedUuidReturns400NotA500() throws Exception {
+        mockMvc.perform(get("/transactions/{id}", "not-a-uuid"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.error").value("Malformed Request"));
+    }
+
+    /**
+     * Phase 4 bugfix C: an amount whose precision/scale exceeds the
+     * {@code entries.amount NUMERIC(19,4)} column previously reached the DB,
+     * failed with a numeric-overflow {@code DataIntegrityViolationException},
+     * and was mapped by the generic fallback handler to 409 - the same
+     * status documented for "Idempotency-Key reused with a different body",
+     * which would mislead a client into treating this as a safe-to-refetch
+     * idempotent conflict. {@code EntryRequest.amount}'s new
+     * {@code @Digits(integer = 15, fraction = 4)} constraint now catches
+     * this before any DB call, returning 400 - never a 409 - and no
+     * transaction is persisted.
+     */
+    @Test
+    void createTransaction_implausiblyLargeAmountReturns400NotConflict() throws Exception {
+        String body = """
+                {
+                  "description": "huge amount",
+                  "entries": [
+                    {"accountId": "%s", "amount": "99999999999999999999999999999", "direction": "DEBIT"},
+                    {"accountId": "%s", "amount": "99999999999999999999999999999", "direction": "CREDIT"}
+                  ]
+                }
+                """.formatted(cashAccountId, revenueAccountId);
+
+        mockMvc.perform(post("/transactions")
+                        .header("Idempotency-Key", "key-huge-amount-1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.error").value("Validation Failed"));
+
+        assertThat(transactionRepository.findByIdempotencyKey("key-huge-amount-1")).isEmpty();
+        assertThat(transactionRepository.count()).isZero();
+    }
+
+    /**
      * Concurrent-replay race: two requests with the same brand-new
      * Idempotency-Key and the same body arrive "simultaneously" (both pass
      * the read-before-write check before either has committed). The

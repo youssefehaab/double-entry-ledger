@@ -116,6 +116,34 @@ class AccountControllerIntegrationTest extends AbstractIntegrationTest {
                 .andExpect(status().isBadRequest());
     }
 
+    /**
+     * Phase 4 bugfix B: an unsupported Content-Type (valid JSON body, wrong
+     * header) previously fell through to the generic {@code
+     * Exception.class} handler and returned an undocumented 500. {@code
+     * GlobalExceptionHandler#handleUnsupportedMediaType} now maps Spring's
+     * {@code HttpMediaTypeNotSupportedException} to a clean 415, and no
+     * account is created.
+     */
+    @Test
+    void createAccount_wrongContentTypeReturns415NotA500() throws Exception {
+        String requestBody = """
+                {
+                  "name": "Cash",
+                  "currency": "USD",
+                  "accountType": "ASSET"
+                }
+                """;
+
+        mockMvc.perform(post("/accounts")
+                        .contentType(MediaType.TEXT_PLAIN)
+                        .content(requestBody))
+                .andExpect(status().isUnsupportedMediaType())
+                .andExpect(jsonPath("$.status").value(415))
+                .andExpect(jsonPath("$.error").value("Unsupported Media Type"));
+
+        assertThat(accountRepository.count()).isZero();
+    }
+
     @Test
     void createAccount_twoRequestsCreateTwoDistinctAccounts() throws Exception {
         String requestBody = """

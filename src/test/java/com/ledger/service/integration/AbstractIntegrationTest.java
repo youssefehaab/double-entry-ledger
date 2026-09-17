@@ -55,6 +55,15 @@ public abstract class AbstractIntegrationTest {
         registry.add("spring.datasource.url", POSTGRES::getJdbcUrl);
         registry.add("spring.datasource.username", POSTGRES::getUsername);
         registry.add("spring.datasource.password", POSTGRES::getPassword);
+        // The default (production) pool size of 10 (see application.yml) is
+        // deliberately widened for the whole shared test context - not just
+        // one test class - so that Phase 3's concurrency tests can exercise
+        // real, simultaneous in-flight DB transactions (many threads each
+        // holding their own connection while blocked on a row lock) rather
+        // than having most of the intended concurrency absorbed/serialized
+        // by connection-pool queuing before a request ever reaches the
+        // account-row lock it's supposed to be contending on.
+        registry.add("spring.datasource.hikari.maximum-pool-size", () -> "50");
     }
 
     @Autowired

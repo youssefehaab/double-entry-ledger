@@ -1,0 +1,44 @@
+-- Phase 4 self-review finding: GET /accounts/{id}/entries
+-- (EntryRepository#findByAccountIdOrderByCreatedAtAscIdAsc) filters by
+-- account_id and orders by (created_at, id). The existing
+-- idx_entries_account_id index (from V3) covers the WHERE clause but not the
+-- ORDER BY, so Postgres must still perform an in-memory/on-disk sort of every
+-- matching row on each page request once an account accumulates enough
+-- entries to exceed work_mem - increasingly expensive as an account's entry
+-- history grows, even though only one page is ever returned.
+--
+-- A composite index on (account_id, created_at, id) lets Postgres satisfy
+-- both the filter and the sort directly from the index (an index-order scan
+-- with a LIMIT/OFFSET), independent of table size. id is included as the
+-- third column purely as the same tiebreaker the query already sorts by,
+-- for rows created in the same instant.
+--
+-- The old single-column idx_entries_account_id index is dropped: this
+-- composite index is a strict superset of what it provided for any query
+-- filtering on account_id alone (the DB-level balance-sum query included),
+-- so keeping both would only add index-maintenance overhead on every
+-- entries INSERT with no corresponding read benefit.
+--
+-- Judgment call / flag for reviewer: a plain (transactional) CREATE INDEX is
+-- used here, NOT CREATE INDEX CONCURRENTLY. CONCURRENTLY was tried first, on
+-- the reasoning that it avoids holding a table lock for the build's
+-- duration - but CONCURRENTLY also has to wait for every session that had
+-- already taken a snapshot of the table to finish before it can complete,
+-- and in a connection-pooled environment (this app's own HikariCP pool, and
+-- equally a pooled test/ops client) a single idle-in-transaction pooled
+-- connection blocks that wait *indefinitely*, with no error and no
+-- timeout - which is exactly what happened running this migration against
+-- the Testcontainers-backed test suite locally. That failure mode (a silent
+-- hang with no automatic resolution) is worse for this table's realistic
+-- size than a plain CREATE INDEX's brief SHARE lock (blocks concurrent
+-- writes to `entries`, not reads, for the time it takes to build the index -
+-- seconds, not minutes, at any table size this service is likely to reach
+-- before a dedicated maintenance-window migration would be planned anyway).
+-- If `entries` ever grows large enough that even a brief write-blocking lock
+-- is unacceptable, run the CONCURRENTLY form by hand against a dedicated,
+-- non-pooled connection during a maintenance window, rather than through
+-- Flyway/a pooled connection.
+CREATE INDEX IF NOT EXISTS idx_entries_account_id_created_at_id
+    ON entries (account_id, created_at, id);
+
+DROP INDEX IF EXISTS idx_entries_account_id;

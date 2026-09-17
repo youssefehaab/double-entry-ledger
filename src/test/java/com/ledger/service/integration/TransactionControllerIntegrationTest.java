@@ -298,6 +298,80 @@ class TransactionControllerIntegrationTest extends AbstractIntegrationTest {
         assertThat(transactionRepository.count()).isZero();
     }
 
+    /** Self-review (task 17): the DB CHECK constraint (chk_entries_amount_positive) rejects amount <= 0, but a
+     *  clean app-level 400 - via {@code @Positive} on {@link com.ledger.service.api.dto.EntryRequest#amount()} -
+     *  must reject it first, before any DB round trip, rather than leaking a raw constraint-violation error. */
+    @Test
+    void createTransaction_rejectsZeroAmountWith400AndPersistsNothing() throws Exception {
+        String body = balancedRequestBody("Zero amount", "0.00");
+
+        mockMvc.perform(post("/transactions")
+                        .header("Idempotency-Key", "key-zero-amount-1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("Validation Failed"));
+
+        assertThat(transactionRepository.count()).isZero();
+    }
+
+    /** Same as {@link #createTransaction_rejectsZeroAmountWith400AndPersistsNothing()}, for a negative amount. */
+    @Test
+    void createTransaction_rejectsNegativeAmountWith400AndPersistsNothing() throws Exception {
+        String body = balancedRequestBody("Negative amount", "-10.00");
+
+        mockMvc.perform(post("/transactions")
+                        .header("Idempotency-Key", "key-negative-amount-1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("Validation Failed"));
+
+        assertThat(transactionRepository.count()).isZero();
+    }
+
+    /**
+     * Self-review (task 17) judgment call: <b>self-transfers are allowed</b>.
+     * The invariant this service enforces is sum(DEBIT) == sum(CREDIT) for
+     * the whole transaction (see {@code TransactionBalanceValidator} and the
+     * V5 DB trigger) - not a per-account rule about which accounts may
+     * appear more than once, or in both directions, within one transaction.
+     * Multiple legs against the same account, including opposite-direction
+     * legs, is standard, valid double-entry practice (e.g. a compound
+     * journal entry that debits and credits the same control account as
+     * part of a larger multi-leg posting). Rejecting it would be an
+     * arbitrary business rule with no grounding in double-entry accounting
+     * principles and no natural definition of what should count as "a
+     * self-transfer" once more than two legs are involved. This test proves
+     * the behavior is deliberate, not an accidental oversight: the same
+     * account posts both a debit and a credit leg in one transaction, and
+     * it is accepted with 201, with the account's own two entries netting
+     * to zero balance change.
+     */
+    @Test
+    void createTransaction_allowsSameAccountAsBothDebitAndCreditLeg() throws Exception {
+        String body = """
+                {
+                  "description": "Self-transfer: same account both legs",
+                  "entries": [
+                    {"accountId": "%s", "amount": "25.00", "direction": "DEBIT"},
+                    {"accountId": "%s", "amount": "25.00", "direction": "CREDIT"}
+                  ]
+                }
+                """.formatted(cashAccountId, cashAccountId);
+
+        mockMvc.perform(post("/transactions")
+                        .header("Idempotency-Key", "key-self-transfer-1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status").value("POSTED"))
+                .andExpect(jsonPath("$.entries.length()").value(2));
+
+        UUID txId = transactionRepository.findByIdempotencyKey("key-self-transfer-1").get().getId();
+        assertThat(entryRepository.findByTransactionId(txId)).hasSize(2);
+    }
+
     /**
      * Concurrent-replay race: two requests with the same brand-new
      * Idempotency-Key and the same body arrive "simultaneously" (both pass

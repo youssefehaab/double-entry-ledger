@@ -12,7 +12,7 @@ info:
     name: Proprietary
   version: 0.2.0
 servers:
-- url: http://localhost:8099
+- url: http://localhost:8080
   description: Generated server url
 tags:
 - name: Transactions
@@ -65,7 +65,8 @@ paths:
                 $ref: "#/components/schemas/TransactionResponse"
         "400":
           description: "Missing/blank Idempotency-Key header, or request body validation\
-            \ failed"
+            \ failed (including an entry amount that is non-positive or exceeds the\
+            \ supported precision/scale of 15 integer and 4 fraction digits)"
           content:
             '*/*':
               schema:
@@ -117,6 +118,12 @@ paths:
             '*/*':
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "415":
+          description: Content-Type is not application/json
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /transactions/{id}:
     get:
       tags:
@@ -137,6 +144,12 @@ paths:
             '*/*':
               schema:
                 $ref: "#/components/schemas/TransactionResponse"
+        "400":
+          description: "{id} is not a valid UUID"
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "404":
           description: No transaction with this id
           content:
@@ -171,6 +184,12 @@ paths:
             '*/*':
               schema:
                 $ref: "#/components/schemas/PagedEntriesResponse"
+        "400":
+          description: "{id} is not a valid UUID"
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "404":
           description: No account with this id
           content:
@@ -201,6 +220,12 @@ paths:
             '*/*':
               schema:
                 $ref: "#/components/schemas/BalanceResponse"
+        "400":
+          description: "{id} is not a valid UUID"
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "404":
           description: No account with this id
           content:
@@ -236,7 +261,7 @@ components:
         amount:
           type: number
           description: "Unsigned amount; sign is carried by direction, not the amount\
-            \ itself"
+            \ itself. At most 15 integer digits and 4 fraction digits."
           example: 100.0
           exclusiveMinimum: 0
         direction:

@@ -1,0 +1,40 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-ledger}
+      POSTGRES_USER: ${DB_USERNAME:-ledger}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-ledger}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - ledger_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-ledger} -d ${DB_NAME:-ledger}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-ledger}
+      DB_USERNAME: ${DB_USERNAME:-ledger}
+      DB_PASSWORD: ${DB_PASSWORD:-ledger}
+      SERVER_PORT: ${SERVER_PORT:-8080}
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  ledger_postgres_data:
+    name: ledger_postgres_data

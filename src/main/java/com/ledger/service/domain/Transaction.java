@@ -20,10 +20,14 @@ import org.hibernate.annotations.CreationTimestamp;
  * clashing with the TRANSACTION keyword used by SQL tooling; the Java class
  * keeps the singular, more natural domain name.
  *
- * <p>Entry-creation and status transitions (PENDING -&gt; POSTED / FAILED)
- * land in Phase 2 alongside the DB-level balance trigger already in place
- * (V5 migration). This class only models the shape needed for that: no
- * transition logic here yet.
+ * <p>Phase 2 adds the one transition this service currently drives:
+ * PENDING -&gt; POSTED, via {@link #markPosted(Instant)}, called once, in
+ * memory, before the transaction (and its entries) are ever persisted - so
+ * only POSTED transactions are ever written to the DB in this phase. There
+ * is no asynchronous/PENDING-then-later-POSTED flow yet (that would be a
+ * future phase), so FAILED is likewise not driven by any code path yet;
+ * both remain valid per the {@code chk_transactions_status} CHECK
+ * constraint for forward compatibility.
  */
 @Entity
 @Table(name = "transactions")
@@ -83,5 +87,26 @@ public class Transaction {
 
     public Instant getPostedAt() {
         return postedAt;
+    }
+
+    /**
+     * Transitions this transaction from PENDING to POSTED and stamps
+     * {@code postedAt}. Deliberately the only state-mutating method on this
+     * class (entries remain fully immutable, per {@link Entry}) and
+     * deliberately not a generic setter: the only legal transition modeled
+     * today is PENDING -&gt; POSTED, so that is the only thing this API
+     * allows.
+     *
+     * @throws IllegalStateException if called on a transaction that is not
+     *         currently PENDING (guards against double-posting the same
+     *         in-memory instance)
+     */
+    public void markPosted(Instant postedAt) {
+        if (this.status != TransactionStatus.PENDING) {
+            throw new IllegalStateException(
+                    "cannot mark transaction as POSTED from status " + this.status);
+        }
+        this.status = TransactionStatus.POSTED;
+        this.postedAt = Objects.requireNonNull(postedAt, "postedAt must not be null");
     }
 }

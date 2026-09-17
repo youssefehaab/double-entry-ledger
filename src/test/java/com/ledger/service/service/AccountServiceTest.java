@@ -10,6 +10,7 @@ import com.ledger.service.api.dto.CreateAccountRequest;
 import com.ledger.service.domain.Account;
 import com.ledger.service.domain.AccountType;
 import com.ledger.service.repository.AccountRepository;
+import com.ledger.service.repository.EntryRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -23,11 +24,14 @@ class AccountServiceTest {
     @Mock
     private AccountRepository accountRepository;
 
+    @Mock
+    private EntryRepository entryRepository;
+
     private AccountService accountService;
 
     @BeforeEach
     void setUp() {
-        accountService = new AccountService(accountRepository);
+        accountService = new AccountService(accountRepository, entryRepository);
     }
 
     @Test

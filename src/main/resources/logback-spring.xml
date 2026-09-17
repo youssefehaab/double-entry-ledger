@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Structured (JSON) logging for the ledger service.
+
+  Every log line is emitted as one JSON object (via logstash-logback-encoder)
+  rather than a free-form text line, so logs are machine-parseable by a log
+  aggregator (ELK/Loki/CloudWatch/etc.) without a fragile regex parser. Each
+  line's `mdc` fields include `requestId`/`traceId` (see CorrelationIdFilter),
+  so every log line emitted while handling a single HTTP request - across
+  the controller, service, and repository layers - carries the same
+  correlation id and can be grepped/joined back into one request's timeline,
+  which is the concrete, minimal substitute for a full distributed-tracing
+  backend called for in Phase 4 (see CorrelationIdFilter javadoc).
+-->
+<configuration>
+    <springProperty scope="context" name="applicationName" source="spring.application.name"/>
+
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <includeMdcKeyName>requestId</includeMdcKeyName>
+            <includeMdcKeyName>traceId</includeMdcKeyName>
+            <customFields>{"application":"${applicationName}"}</customFields>
+            <fieldNames>
+                <timestamp>timestamp</timestamp>
+                <version>[ignore]</version>
+            </fieldNames>
+        </encoder>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="STDOUT"/>
+    </root>
+
+    <logger name="org.flywaydb" level="INFO"/>
+    <logger name="com.ledger.service" level="INFO"/>
+</configuration>

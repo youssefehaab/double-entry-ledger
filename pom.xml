@@ -73,6 +73,23 @@
             <artifactId>micrometer-core</artifactId>
         </dependency>
 
+        <!-- Actuator: /actuator/health (incl. DB connectivity) and /actuator/metrics
+             (JVM + HTTP request metrics via Micrometer, brought in transitively). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <!-- Structured (JSON) logging, configured in logback-spring.xml. Every log
+             line also carries the per-request correlation id set by
+             CorrelationIdFilter into MDC, so a single request's log lines are
+             traceable across layers without a distributed tracing backend. -->
+        <dependency>
+            <groupId>net.logstash.logback</groupId>
+            <artifactId>logstash-logback-encoder</artifactId>
+            <version>8.0</version>
+        </dependency>
+
         <!-- Test -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

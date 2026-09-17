@@ -40,6 +40,31 @@ springdoc:
   swagger-ui:
     path: /swagger-ui.html
 
+management:
+  endpoints:
+    web:
+      exposure:
+        # Deliberately an explicit allow-list, not "*": actuator endpoints
+        # are unauthenticated in this phase (no Spring Security - see the
+        # Phase 4 scope cut), so only the two read-only, non-sensitive
+        # endpoints needed for basic operability are exposed. Endpoints like
+        # /actuator/env or /actuator/beans are never exposed this way.
+        include: health,metrics
+  endpoint:
+    health:
+      # "when-authorized" would require Spring Security to ever show details;
+      # there is none in this phase, so pin to always so the DB-down case is
+      # actually visible (component-level DOWN status) rather than collapsing
+      # to a bare "UP"/"DOWN" with no indication of which dependency failed.
+      show-details: always
+  health:
+    # Explicit rather than relying on autoconfiguration defaults: the
+    # DataSourceHealthContributorAutoConfiguration-provided "db" indicator
+    # (a real `SELECT 1`-style validation query against Postgres) must be
+    # part of the aggregate /actuator/health status.
+    db:
+      enabled: true
+
 logging:
   level:
     org.flywaydb: INFO

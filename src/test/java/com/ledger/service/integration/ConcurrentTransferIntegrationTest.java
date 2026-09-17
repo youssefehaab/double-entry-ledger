@@ -28,16 +28,32 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
 /**
- * Proves that the pessimistic account-row locking in
- * {@code TransactionWriter#lockAccountsInOrder} correctly serializes
- * concurrent posting against the same two accounts: no entry is lost,
- * duplicated, or partially committed, and final balances reconcile exactly
- * under genuine concurrent contention. It also proves the sorted lock
- * ordering does what it claims: transfer direction between the two accounts
- * is deliberately alternated, which is exactly the shape that would
- * deadlock if locks were acquired in request-payload order instead of
- * sorted account-id order (see the javadoc on
- * {@code TransactionWriter#lockAccountsInOrder} for the deadlock scenario).
+ * Proves two distinct things under genuine concurrent contention against the
+ * same two accounts, attributed here to their actual respective causes
+ * (consistent with the rationale already documented on {@code
+ * TransactionWriter#lockAccountsInOrder} - see there for the full
+ * argument):
+ * <ul>
+ *   <li><b>No deadlock or crash under heavy alternating contention</b> - this
+ *       is what the pessimistic account-row locking plus ascending-account-id
+ *       lock ordering actually buys. Transfer direction between the two
+ *       accounts is deliberately alternated, which is exactly the shape that
+ *       would deadlock if locks were acquired in request-payload order
+ *       instead of sorted account-id order; this test proves that shape runs
+ *       to completion without a deadlock or a dropped/timed-out request.</li>
+ *   <li><b>No entry is lost, duplicated, or partially committed, and final
+ *       balances reconcile exactly</b> - this guarantee does <em>not</em>
+ *       come from the row lock. It comes from the insert-only design (no
+ *       row is ever updated in place, so there is no lost-update window to
+ *       protect against), the deferred per-transaction balance constraint
+ *       trigger (V5 migration, which makes each transaction's own entries
+ *       commit atomically as a balanced all-or-nothing unit), and Postgres
+ *       MVCC (which guarantees a reader never observes a torn, half-posted
+ *       transaction). Those three would hold, and this assertion would still
+ *       pass, even without any row lock at all - the lock's role here is
+ *       confined to the deadlock-freedom/ordering guarantee above, not to
+ *       this one.</li>
+ * </ul>
  *
  * <h2>Why this proves something, not just "it ran"</h2>
  * <ul>

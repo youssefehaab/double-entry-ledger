@@ -1,9 +1,20 @@
 package com.ledger.service.service;
 
 import com.ledger.service.api.dto.AccountResponse;
+import com.ledger.service.api.dto.BalanceResponse;
 import com.ledger.service.api.dto.CreateAccountRequest;
+import com.ledger.service.api.dto.PagedEntriesResponse;
 import com.ledger.service.domain.Account;
+import com.ledger.service.domain.Entry;
 import com.ledger.service.repository.AccountRepository;
+import com.ledger.service.repository.EntryRepository;
+import com.ledger.service.service.exception.AccountNotFoundException;
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.util.UUID;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -11,9 +22,11 @@ import org.springframework.transaction.annotation.Transactional;
 public class AccountService {
 
     private final AccountRepository accountRepository;
+    private final EntryRepository entryRepository;
 
-    public AccountService(AccountRepository accountRepository) {
+    public AccountService(AccountRepository accountRepository, EntryRepository entryRepository) {
         this.accountRepository = accountRepository;
+        this.entryRepository = entryRepository;
     }
 
     /**
@@ -45,5 +58,44 @@ public class AccountService {
 
     private String normalizeCurrency(String currency) {
         return currency.trim().toUpperCase();
+    }
+
+    /**
+     * Computes an account's balance on the fly by summing its entries -
+     * never from a stored column (there is none). See {@link
+     * com.ledger.service.repository.EntryRepository#sumSignedAmountsByAccountId}
+     * for the sign convention (debit-positive).
+     *
+     * @throws AccountNotFoundException if no account has this id (mapped to 404)
+     */
+    @Transactional(readOnly = true)
+    public BalanceResponse getBalance(UUID accountId) {
+        requireAccountExists(accountId);
+        BigDecimal balance = entryRepository.sumSignedAmountsByAccountId(accountId);
+        return new BalanceResponse(accountId, balance, Instant.now());
+    }
+
+    /**
+     * Paginated entries for an account, ordered by created_at then id for
+     * deterministic, stable pagination.
+     *
+     * @throws AccountNotFoundException if no account has this id (mapped to 404)
+     */
+    @Transactional(readOnly = true)
+    public PagedEntriesResponse getEntries(UUID accountId, Pageable pageable) {
+        requireAccountExists(accountId);
+        // Only page number/size from the caller-supplied Pageable are
+        // honored; sort order is fixed (created_at, id) rather than
+        // client-controlled, so pagination stays deterministic regardless
+        // of what sort params a client passes.
+        Pageable fixedOrderPageable = PageRequest.of(pageable.getPageNumber(), pageable.getPageSize());
+        Page<Entry> page = entryRepository.findByAccountIdOrderByCreatedAtAscIdAsc(accountId, fixedOrderPageable);
+        return PagedEntriesResponse.from(page);
+    }
+
+    private void requireAccountExists(UUID accountId) {
+        if (!accountRepository.existsById(accountId)) {
+            throw new AccountNotFoundException(accountId);
+        }
     }
 }

@@ -107,9 +107,9 @@ flowchart TB
     end
 
     subgraph Async["Async relay + event pipeline"]
-        OR[OutboxRelay<br/>@Scheduled poller]
+        OR["OutboxRelay<br/>@Scheduled poller"]
         KAFKA[["Kafka topic<br/>transaction-posted-events"]]
-        CONS[TransactionPostedEventConsumer<br/>logging proof-of-pipeline @KafkaListener]
+        CONS["TransactionPostedEventConsumer<br/>logging proof-of-pipeline @KafkaListener"]
     end
 
     C -->|HTTP JSON| CIF --> AC & TC

@@ -27,6 +27,11 @@
         <allure.version>2.27.0</allure.version>
         <swagger-request-validator.version>3.0.0</swagger-request-validator.version>
         <aspectj.version>1.9.22</aspectj.version>
+        <!-- Matches the docker-compose `kafka` service's broker image tag (apache/kafka:3.8.0)
+             exactly, so this client speaks the same protocol version the broker under test
+             actually runs - see TransactionPostedEventApiTest, the first (and currently only)
+             consumer of this dependency in this module. -->
+        <kafka-clients.version>3.8.0</kafka-clients.version>
 
         <!-- Overridable: -Dapi.baseUri=http://localhost:8080 -->
         <api.baseUri>http://localhost:8080</api.baseUri>
@@ -105,6 +110,17 @@
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
             <version>2.17.1</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Real Kafka consumer client, used by TransactionPostedEventApiTest to independently
+             verify (as a black-box observer, not via DB access) that a posted transaction's
+             outbox event actually reaches the real transaction-posted-events topic. Test-scoped
+             only - this module has no production code of its own. -->
+        <dependency>
+            <groupId>org.apache.kafka</groupId>
+            <artifactId>kafka-clients</artifactId>
+            <version>${kafka-clients.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>

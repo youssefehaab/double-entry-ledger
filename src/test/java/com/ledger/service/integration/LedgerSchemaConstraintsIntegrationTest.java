@@ -19,8 +19,9 @@ import org.springframework.beans.factory.annotation.Autowired;
  * Postgres:
  *
  * <ol>
- *   <li>A set of entries for a transaction that does not balance
- *       (sum(DEBIT) != sum(CREDIT)) can never be committed.</li>
+ *   <li>A set of entries for a transaction that does not balance in the
+ *       base currency (sum of signed base_currency_amount != 0, as of the
+ *       V9 migration) can never be committed.</li>
  *   <li>An entry row, once inserted, can never be UPDATEd or DELETEd.</li>
  * </ol>
  *
@@ -28,6 +29,15 @@ import org.springframework.beans.factory.annotation.Autowired;
  * commit()) rather than through JPA/Spring's transaction manager, precisely
  * to prove the guarantee is enforced by Postgres itself and not merely by
  * application-level code paths.
+ *
+ * <p>{@link #insertEntry} always populates base_currency_amount /
+ * fx_rate_used / fx_rate_effective_at alongside amount (all single-currency
+ * USD accounts here, so base_currency_amount == amount and fx_rate_used ==
+ * 1 - the identity case) precisely so these raw-SQL tests keep exercising
+ * the balance check itself (V9) rather than tripping the separate "missing
+ * base_currency_amount" failure the V9 trigger also raises - see {@link
+ * MultiCurrencyBalanceTriggerIntegrationTest} for tests of that failure
+ * mode and of genuine multi-currency (non-1:1) balancing.
  */
 class LedgerSchemaConstraintsIntegrationTest extends AbstractIntegrationTest {
 
@@ -190,13 +200,22 @@ class LedgerSchemaConstraintsIntegrationTest extends AbstractIntegrationTest {
     private UUID insertEntry(
             Connection conn, UUID transactionId, UUID accountId, BigDecimal amount, String direction)
             throws SQLException {
+        // All test accounts here are USD, and the app's own base currency
+        // default is USD (see application.yml ledger.fx.base-currency), so
+        // this is exactly the identity conversion: base_currency_amount ==
+        // amount, fx_rate_used == 1. See the class javadoc for why these
+        // raw-SQL tests must populate the FX columns at all post-V9.
         try (PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO entries (transaction_id, account_id, amount, direction) "
-                        + "VALUES (?, ?, ?, ?) RETURNING id")) {
+                "INSERT INTO entries "
+                        + "(transaction_id, account_id, amount, direction, base_currency_amount, "
+                        + "fx_rate_used, fx_rate_effective_at) "
+                        + "VALUES (?, ?, ?, ?, ?, ?, now()) RETURNING id")) {
             ps.setObject(1, transactionId);
             ps.setObject(2, accountId);
             ps.setBigDecimal(3, amount);
             ps.setString(4, direction);
+            ps.setBigDecimal(5, amount);
+            ps.setBigDecimal(6, BigDecimal.ONE);
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
                 return (UUID) rs.getObject("id");

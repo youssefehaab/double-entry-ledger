@@ -5,11 +5,16 @@ import com.ledger.service.api.dto.EntryRequest;
 import com.ledger.service.api.dto.TransactionResponse;
 import com.ledger.service.domain.Account;
 import com.ledger.service.domain.Entry;
+import com.ledger.service.domain.OutboxEvent;
 import com.ledger.service.domain.Transaction;
 import com.ledger.service.repository.AccountRepository;
 import com.ledger.service.repository.EntryRepository;
+import com.ledger.service.repository.OutboxEventRepository;
 import com.ledger.service.repository.TransactionRepository;
 import com.ledger.service.service.exception.AccountNotFoundException;
+import com.ledger.service.service.fx.FxConversionResult;
+import com.ledger.service.service.fx.FxRateProvider;
+import com.ledger.service.service.outbox.OutboxEventFactory;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -17,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -44,14 +50,34 @@ public class TransactionWriter {
     private final TransactionRepository transactionRepository;
     private final EntryRepository entryRepository;
     private final AccountRepository accountRepository;
+    private final OutboxEventRepository outboxEventRepository;
+    private final OutboxEventFactory outboxEventFactory;
+    private final FxRateProvider fxRateProvider;
+    private final String baseCurrency;
 
     public TransactionWriter(
             TransactionRepository transactionRepository,
             EntryRepository entryRepository,
-            AccountRepository accountRepository) {
+            AccountRepository accountRepository,
+            OutboxEventRepository outboxEventRepository,
+            OutboxEventFactory outboxEventFactory,
+            FxRateProvider fxRateProvider,
+            @Value("${ledger.fx.base-currency:USD}") String baseCurrency) {
         this.transactionRepository = transactionRepository;
         this.entryRepository = entryRepository;
         this.accountRepository = accountRepository;
+        this.outboxEventRepository = outboxEventRepository;
+        this.outboxEventFactory = outboxEventFactory;
+        this.fxRateProvider = fxRateProvider;
+        // Normalized once, here, the same way AccountService.normalizeCurrency
+        // normalizes account currencies (trim + uppercase) - so the two are
+        // guaranteed comparable. Without this, an operator setting
+        // FX_BASE_CURRENCY=usd (lowercase) would make DbFxRateProvider's
+        // same-currency identity short-circuit ("USD".equals("usd") == false)
+        // fail to match, incorrectly falling through to a DB lookup and
+        // likely throwing UnsupportedCurrencyPairException for what should
+        // be a same-currency no-op conversion.
+        this.baseCurrency = baseCurrency.trim().toUpperCase();
     }
 
     @Transactional(readOnly = true)
@@ -72,6 +98,33 @@ public class TransactionWriter {
      * (status POSTED, postedAt set) and its Entries atomically in one DB
      * transaction.
      *
+     * <p>FX conversion (Phase 1 of v1 -&gt; v1.1): for every entry, {@link
+     * #fxRateProvider} converts {@code entryRequest.amount()} from that
+     * entry's account's currency into {@link #baseCurrency}, and the result
+     * (converted amount, rate used, rate's effective-at) is passed straight
+     * into the {@link Entry} constructor - computed and persisted inside
+     * this same {@code @Transactional} method, atomically with the entry
+     * row itself, never as a separate step that could drift from what was
+     * actually posted or be computed post-hoc. A same-currency entry goes
+     * through this identical call ({@code fxRateProvider.convert(cur, cur,
+     * amount)}); see {@code DbFxRateProvider}'s javadoc for why that is
+     * still guaranteed to be a pure identity conversion. If no FX rate is
+     * available for a genuinely cross-currency pair, {@link
+     * com.ledger.service.service.exception.UnsupportedCurrencyPairException}
+     * propagates from here before any row is written, rolling back this
+     * whole transaction (including the already-flushed Transaction row).
+     *
+     * <p>App-level balance pre-check ({@link TransactionBalanceValidator})
+     * also now happens here, on the FX-converted entries, rather than in
+     * {@link TransactionService} before this method is even called as it
+     * did pre-FX: base_currency_amount does not exist until accounts are
+     * loaded and converted above, so this is the earliest point a
+     * currency-aware balance check is possible. Still strictly before any
+     * {@link Entry} row is inserted - see that class's javadoc for the full
+     * reasoning on why a currency-blind pre-check on raw request amounts is
+     * no longer correct once entries can span multiple currencies.
+     *
+
      * <p>Isolation: default READ COMMITTED is sufficient here. The
      * invariant this method must never violate - "no two POSTED
      * transactions share an idempotency_key" - is guaranteed unconditionally
@@ -86,6 +139,30 @@ public class TransactionWriter {
      * used here; an advisory lock keyed on the idempotency key to avoid the
      * loser's wasted insert work is a reasonable further concurrency
      * optimization, not required for correctness now.
+     *
+     * <p>Phase 2 of v1 -&gt; v1.1 (outbox pattern): exactly one {@link
+     * OutboxEvent} row ({@code event_type = TransactionPosted}) is inserted
+     * here too, in this SAME {@code @Transactional} method - after entries
+     * are saved/flushed and validated as balanced, but still strictly
+     * before this method returns and its transaction commits. This is the
+     * entire point of the outbox pattern: "the transaction posted" and "an
+     * event describing it was durably recorded" are the same atomic DB
+     * commit, never two independent writes that could drift (e.g. the
+     * entries commit but the app crashes before a separate, later Kafka
+     * publish call - or a Kafka publish succeeds but the enclosing DB
+     * transaction then rolls back). Proof this is the same transaction: no
+     * {@code @Transactional} boundary appears between {@code
+     * entryRepository.flush()} above and {@code
+     * outboxEventRepository.save(outboxEvent)} below - both run under the
+     * single {@code @Transactional} on this method, and if {@link
+     * TransactionBalanceValidator#validateBalanced} or the entries flush
+     * throws, this method returns via exception before the outbox insert is
+     * ever reached, so nothing is saved at all (see
+     * {@code TransactionWriterOutboxAtomicityIntegrationTest} for a test
+     * that forces exactly this rollback and asserts zero outbox rows
+     * exist). Nothing else in this codebase ever writes to Kafka directly -
+     * {@code OutboxRelay} is the only reader of PENDING rows here, running
+     * in its own separate, later transaction(s).
      *
      * @throws AccountNotFoundException if any entries[].accountId does not exist
      * @throws org.springframework.dao.DataIntegrityViolationException if the
@@ -106,14 +183,29 @@ public class TransactionWriter {
         List<Entry> entries = new ArrayList<>();
         for (EntryRequest entryRequest : request.entries()) {
             Account account = accountsById.get(entryRequest.accountId());
-            entries.add(new Entry(transaction, account, entryRequest.amount(), entryRequest.direction()));
+            FxConversionResult conversion = fxRateProvider.convert(
+                    account.getCurrency(), baseCurrency, entryRequest.amount());
+            entries.add(new Entry(
+                    transaction,
+                    account,
+                    entryRequest.amount(),
+                    entryRequest.direction(),
+                    conversion.convertedAmount(),
+                    conversion.rateUsed(),
+                    conversion.rateEffectiveAt()));
         }
+        TransactionBalanceValidator.validateBalanced(entries);
         entryRepository.saveAll(entries);
         // Flush now (rather than waiting for implicit flush-on-commit) so
         // that, within this same DB transaction, the deferred balance
         // constraint trigger (V5 migration) is queued against the actual
         // inserted rows and will be checked at commit exactly as designed.
         entryRepository.flush();
+
+        // Same DB transaction as the entries flush above - see this
+        // method's javadoc for why that atomicity is the entire point.
+        OutboxEvent outboxEvent = outboxEventFactory.transactionPosted(transaction, entries);
+        outboxEventRepository.save(outboxEvent);
 
         return TransactionResponse.from(transaction, entries);
     }

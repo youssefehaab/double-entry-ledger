@@ -83,22 +83,33 @@ flowchart TB
     subgraph Service["Service layer"]
         AS[AccountService]
         TS[TransactionService<br/>idempotency orchestration]
-        TW[TransactionWriter<br/>locking + persistence]
-        TBV[TransactionBalanceValidator<br/>app-level pre-check]
+        TW[TransactionWriter<br/>locking + persistence + FX + outbox insert]
+        TBV[TransactionBalanceValidator<br/>app-level pre-check, base-currency-aware]
+        FXP[FxRateProvider / DbFxRateProvider<br/>DB-backed rate lookup]
     end
 
     subgraph Data["Repository layer (Spring Data JPA)"]
         AR[AccountRepository<br/>SELECT ... FOR UPDATE]
         TR[TransactionRepository]
         ER[EntryRepository]
+        FXR[FxRateRepository]
+        OER[OutboxEventRepository<br/>SELECT ... FOR UPDATE SKIP LOCKED]
     end
 
     subgraph DB["PostgreSQL"]
         ACCT[(accounts)]
         TXN[(transactions)]
         ENT[(entries)]
+        FXT[(fx_rates<br/>static seeded rates)]
+        OUT[(outbox_events<br/>PENDING/PUBLISHED/FAILED)]
         TRIG1{{"trg_entries_immutable<br/>(V4) rejects UPDATE/DELETE"}}
-        TRIG2{{"trg_check_transaction_balance<br/>(V5) deferred, checked at COMMIT"}}
+        TRIG2{{"trg_check_transaction_balance<br/>(V9, supersedes V5) sum(base_currency_amount), deferred, checked at COMMIT"}}
+    end
+
+    subgraph Async["Async relay + event pipeline"]
+        OR[OutboxRelay<br/>@Scheduled poller]
+        KAFKA[["Kafka topic<br/>transaction-posted-events"]]
+        CONS[TransactionPostedEventConsumer<br/>logging proof-of-pipeline @KafkaListener]
     end
 
     C -->|HTTP JSON| CIF --> AC & TC
@@ -106,18 +117,26 @@ flowchart TB
     TC --> TS
     TS --> TBV
     TS --> TW
+    TW --> FXP
+    FXP --> FXR
     AS --> AR & ER
-    TW --> AR & TR & ER
+    TW --> AR & TR & ER & OER
     AC -.4xx.-> GEH
     TC -.4xx.-> GEH
 
     AR --> ACCT
     TR --> TXN
     ER --> ENT
+    FXR --> FXT
+    OER --> OUT
     ENT -. fires .-> TRIG1
     ENT -. fires at commit .-> TRIG2
     TRIG1 -. guards .-> ENT
     TRIG2 -. guards balance of .-> TXN
+
+    OR -->|SELECT...FOR UPDATE SKIP LOCKED| OUT
+    OR -->|publish, sync send| KAFKA
+    KAFKA --> CONS
 ```
 
 **Layering, top to bottom:**
@@ -132,12 +151,22 @@ flowchart TB
 3. **Services** - `AccountService` (simple CRUD/read), and for
    transactions, two collaborating beans: `TransactionService` (idempotency
    orchestration - see below) and `TransactionWriter` (owns every DB
-   read/write for transactions/entries, including account-row locking).
-   `TransactionBalanceValidator` is a pure, stateless pre-check.
-4. **Repositories** - Spring Data JPA interfaces over the three tables.
-5. **PostgreSQL** - the schema itself carries two enforcement triggers that
+   read/write for transactions/entries, including account-row locking, FX
+   conversion via `FxRateProvider`, and the outbox insert).
+   `TransactionBalanceValidator` is a pure, stateless pre-check, now
+   operating on FX-converted (base-currency) amounts.
+4. **Repositories** - Spring Data JPA interfaces over the tables above,
+   including `FxRateRepository` (rate lookups) and `OutboxEventRepository`
+   (the relay's locked-poll query).
+5. **PostgreSQL** - the schema itself carries the enforcement triggers that
    hold regardless of what the application layer does or forgets to do
-   (see below).
+   (see below), plus the `fx_rates` and `outbox_events` tables.
+6. **Async relay + event pipeline** - `OutboxRelay`, a `@Scheduled` poller
+   entirely decoupled from the request/response cycle, drains
+   `outbox_events` into Kafka; `TransactionPostedEventConsumer` is a
+   minimal logging consumer that proves the pipeline end-to-end. See
+   [Event publishing (outbox pattern)](#event-publishing-outbox-pattern)
+   for the full design.
 
 ## How to run
 
@@ -147,7 +176,7 @@ run the service, only to build/test it (see next section).
 ```bash
 git clone <this repo> && cd double-entry-ledger
 
-# Clean start: build the app image and start Postgres + the app together.
+# Clean start: build the app image and start Postgres + Kafka + the app together.
 docker compose up --build
 
 # App: http://localhost:8080
@@ -155,12 +184,28 @@ docker compose up --build
 # OpenAPI doc (live, generated): http://localhost:8080/v3/api-docs.yaml
 # Health: http://localhost:8080/actuator/health
 # Metrics: http://localhost:8080/actuator/metrics
+# Kafka (host access, e.g. for a local kafka-console-consumer): localhost:9092
 ```
 
 Flyway migrations run automatically on startup against the `postgres`
 service defined in `docker-compose.yml`; there is no separate migration
-step. To reset to a genuinely clean state (drop all data, including the
-`ledger_postgres_data` volume):
+step.
+
+As of Phase 2 (outbox + Kafka event publishing), the compose stack also
+brings up a single-broker **Kafka** service (KRaft mode, no Zookeeper) and
+a one-shot **`kafka-init`** container that explicitly provisions the
+`transaction-posted-events` topic (partitions/replication-factor set
+explicitly, not left to auto-create) before `app` is allowed to start -
+`app`'s `depends_on` requires `kafka` to be healthy and `kafka-init` to
+have *completed successfully* first. `docker compose up --build` therefore
+brings up `postgres` + `kafka` + `kafka-init` + `app`, in that dependency
+order, with one command; nothing extra to run for Kafka. See
+`docker-compose.yml` for the exact broker config and host port mapping
+(platform-engineer owns verifying the exact port/env-var names stay
+accurate here).
+
+To reset to a genuinely clean state (drop all data, including the
+`ledger_postgres_data` and `ledger_kafka_data` volumes):
 
 ```bash
 docker compose down -v
@@ -169,7 +214,9 @@ docker compose up --build
 
 Config is entirely environment-variable driven (see `application.yml` and
 `docker-compose.yml`): `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USERNAME`,
-`DB_PASSWORD`, `SERVER_PORT`.
+`DB_PASSWORD`, `SERVER_PORT`, `KAFKA_BOOTSTRAP_SERVERS`, plus the
+`FX_BASE_CURRENCY` and `LEDGER_OUTBOX_*` variables covered in the design
+sections below.
 
 ## How to run the tests
 
@@ -255,12 +302,21 @@ Summary:
 | Endpoint | Purpose | Idempotent? |
 |---|---|---|
 | `POST /accounts` | Create an account | No (see [Design decisions](#why-idempotency-keys-are-required)) |
-| `POST /transactions` | Post a balanced transaction | Yes, via required `Idempotency-Key` header |
+| `POST /transactions` | Post a balanced transaction; also FX-converts every entry into the base currency (see [Multi-currency & FX](#multi-currency--fx)) | Yes, via required `Idempotency-Key` header |
 | `GET /transactions/{id}` | Fetch a transaction + its entries | n/a (read) |
-| `GET /accounts/{id}/balance` | Derived, on-the-fly balance | n/a (read) |
+| `GET /accounts/{id}/balance` | Derived, on-the-fly balance **in the account's own native currency** - not base-currency-aware (see [Multi-currency & FX](#multi-currency--fx)) | n/a (read) |
 | `GET /accounts/{id}/entries` | Paginated entry history | n/a (read) |
 | `GET /actuator/health` | Liveness + DB connectivity | n/a |
 | `GET /actuator/metrics` | JVM + HTTP request metrics | n/a |
+
+`POST /transactions` also returns **422** if no FX rate is available to
+convert one of the request's entries into the ledger's base currency
+(`UnsupportedCurrencyPairException`), on top of the pre-existing 422 for an
+unbalanced transaction. `EntryResponse` (embedded in `TransactionResponse`
+and `PagedEntriesResponse`) gained three fields as of Phase 1:
+`baseCurrencyAmount`, `fxRateUsed`, `fxRateEffectiveAt` - see `openapi.yaml`
+for the full schema. Phase 2 (outbox/Kafka) added no new HTTP-visible
+behavior; the outbox and relay are entirely internal.
 
 ## Observability
 
@@ -447,17 +503,219 @@ two opposite-direction legs of equal amount? something else?). See
 `TransactionControllerIntegrationTest#createTransaction_allowsSameAccountAsBothDebitAndCreditLeg`
 for the test proving this is deliberate rather than an accidental gap.
 
+### Multi-currency & FX
+
+As of Phase 1 of v1 -> v1.1, every entry is converted into a configurable
+base/reporting currency (`ledger.fx.base-currency`, env var
+`FX_BASE_CURRENCY`, default `USD`) at post time, and a single transaction
+can legitimately span entries against accounts in different currencies -
+see the `V7`-`V9` migrations, `FxRateProvider`/`DbFxRateProvider`, and
+`TransactionWriter#createAndPersist`.
+
+**Why FX conversion happens inside the same DB transaction as posting.**
+`TransactionWriter#createAndPersist` calls `fxRateProvider.convert(...)`
+for every entry and passes the result straight into the `Entry`
+constructor, all inside its single `@Transactional` method - the same
+transaction that inserts the `Transaction` and `Entry` rows. There is no
+separate "convert, then post" step and therefore no window in which a
+transaction could be posted with stale, missing, or drifted FX data: if no
+rate is available for a genuinely cross-currency pair,
+`UnsupportedCurrencyPairException` propagates before any row is written,
+and the whole attempt (including the already-flushed `Transaction` row)
+rolls back. Conversion is a property of posting, not a step before or
+after it.
+
+**Why the rate is recorded per-entry, not per-transaction.** A
+transaction's legs can reference accounts in different currencies (e.g.
+one EUR-account leg and one USD-account leg in the same transaction), so
+"the FX rate for this transaction" is not even well-defined in general -
+only "the FX rate for this entry's account currency -> base currency" is.
+Recording `fx_rate_used`/`fx_rate_effective_at`/`base_currency_amount` on
+`entries` (V8) rather than on `transactions` is therefore not just
+finer-grained, it is the only version of this that is never wrong. The
+cost - a same-currency transaction repeats an identical (identity) rate on
+every one of its entries instead of storing it once - is an acceptable,
+deliberate trade for correctness over a few bytes of duplication.
+
+**Why the balance trigger now checks `base_currency_amount`, not native
+`amount`.** V5's original trigger summed `entries.amount` directly across
+DEBIT/CREDIT legs, which was correct only because every entry was
+implicitly the same currency. Once entries can span currencies, raw
+amounts are not meaningfully additive - "100 EUR debit, 100 USD credit"
+sums to 0 as raw numbers while being economically nonsense, and a real
+balanced cross-currency transaction ("100 EUR debit, 108 USD credit" at a
+1.08 rate) would be wrongly rejected. V9 supersedes V5's trigger function
+(via `CREATE OR REPLACE FUNCTION` plus an explicit `DROP`/`CREATE
+CONSTRAINT TRIGGER` - V5's own migration file is never edited, per this
+project's forward-only discipline) to sum `base_currency_amount` instead,
+with both legs already expressed in the same currency by the time they're
+inserted. It also hard-fails (rather than silently passing) if any entry
+in the transaction has a NULL `base_currency_amount`, so the invariant
+can't be silently bypassed by a write that skips FX conversion entirely.
+
+**Why the balance check is exact equality, no epsilon - and what makes
+that safe.** V9's check is `v_net_base_amount <> 0` at `NUMERIC(19,4)`
+scale, with no rounding tolerance. This is only safe because rounding is
+centralized to a single point in the whole pipeline -
+`DbFxRateProvider.convert()`, which rounds `amount.multiply(rate)` to
+scale 4 with `RoundingMode.HALF_UP` once, at the moment
+`base_currency_amount` is computed, and nowhere else. Every value the
+trigger ever sums was already rounded the same way, so exact equality
+holds by construction; loosening the check to tolerate a small delta
+would paper over a rounding bug instead of catching one.
+
+**Scope cut: no live FX API, no triangulation.** `DbFxRateProvider` reads
+static, seeded rates from `fx_rates` (illustrative USD<->EUR, USD<->GBP,
+USD<->JPY, EUR<->GBP pairs, explicitly not live market data) - a
+deliberate, documented cut, not an oversight. `FxRateProvider` is a plain
+interface with one implementation wired up; swapping in a live external
+FX API later is a single new `@Component` implementing it, with no change
+to `TransactionWriter` or the schema. There is also no triangulation
+through a third currency - only pairs explicitly seeded in both
+directions are supported, and an unsupported pair returns 422
+(`UnsupportedCurrencyPairException`), the same status/pattern as
+`UnbalancedTransactionException`.
+
+**Current limitation: `GET /accounts/{id}/balance` is not
+base-currency-aware.** It sums `entries.amount` (the native amount) for
+one account - which is correct and unambiguous for that account, since an
+account has exactly one currency and every entry against it is already in
+that currency - but it does not convert or express the result in the
+ledger's base currency, and there is no endpoint that would let a caller
+compare or total balances across accounts in different currencies. The
+only FX-aware data exposed today is per-entry, on `POST /transactions`'
+response (and anywhere else `EntryResponse` appears): `baseCurrencyAmount`,
+`fxRateUsed`, `fxRateEffectiveAt`. A base-currency-aware balance/reporting
+endpoint is a real gap, not a design decision - flagged here rather than
+left implicit, and proven as a limitation (not just asserted) by
+`ConcurrentMultiCurrencyTransferIntegrationTest`, which has to reconcile
+concurrent multi-currency transfers via `base_currency_amount` directly
+because the existing balance endpoint can't.
+
+### Event publishing (outbox pattern)
+
+Phase 2 of v1 -> v1.1 adds durable, at-least-once publication of a
+`TransactionPosted` event to Kafka for every posted transaction, via the
+transactional outbox pattern (`outbox_events` table, V10;
+`TransactionWriter`; `OutboxRelay`; `TransactionPostedEventConsumer`).
+
+**Atomicity: the event is recorded in the same DB transaction as
+posting.** `TransactionWriter#createAndPersist` inserts exactly one
+`outbox_events` row (`event_type = TransactionPosted`) as the last
+statement inside its single `@Transactional` method - after the entries
+are saved and flushed, but still strictly before the method returns and
+the transaction commits. This is the entire point of the outbox pattern:
+"the transaction posted" and "an event describing it was durably
+recorded" are one atomic DB commit, never two independent writes that
+could drift (entries commit but the app crashes before a separate Kafka
+publish call; or a direct Kafka publish succeeds but the enclosing DB
+transaction then rolls back). Nothing in this codebase writes to Kafka
+directly from the request path - `OutboxRelay` is the only reader of
+`PENDING` rows, running later, in its own separate transaction(s).
+
+**Why `SELECT ... FOR UPDATE SKIP LOCKED`.** `OutboxRelay` polls on a
+`@Scheduled` interval (`ledger.outbox.poll-interval-ms`, default 2000ms)
+and locks one eligible row at a time via
+`OutboxEventRepository#lockNextEligibleForRelay`. `FOR UPDATE` locks the
+row for the duration of the relay's transaction; `SKIP LOCKED` means a
+second concurrent relay pass never blocks on a row another pass already
+holds, and never selects it either - it moves on. Only one relay instance
+runs in this scope, so today this mostly protects against overlapping
+scheduled ticks; it is taken deliberately ahead of need so a future
+multi-instance relay deployment is safe by construction rather than
+requiring a redesign later.
+
+**Bounded retry, never infinite.** A failed publish attempt increments
+`attempt_count` and schedules the next eligible retry with exponential
+backoff (`base-seconds * 2^attemptCount`, capped at
+`backoff-max-seconds`; defaults 30s base / 900s cap, both configurable).
+Once `attempt_count` reaches `ledger.outbox.max-attempts` (default 5), the
+row is dead-lettered to `FAILED` and never retried again. A ledger service
+that retried forever on a permanently broken downstream would eventually
+just be spinning - bounding it and surfacing `FAILED` rows is the honest
+alternative to a silent infinite retry loop.
+
+**At-least-once delivery, not exactly-once - and what that means for
+consumers.** A row can, in a narrow window, be successfully sent to Kafka
+and then fail to have its status update committed (e.g. a crash between
+the acknowledged `kafkaTemplate.send(...).get(...)` and the follow-up
+`save()`), in which case the next relay pass re-publishes it. This is
+standard outbox-relay behavior, not a bug. Consequently, any consumer of
+`transaction-posted-events` - including a real downstream service, not
+just the logging proof-of-pipeline one shipped here - **must** be
+idempotent, e.g. by deduplicating on `transactionId`, which is stable and
+unique per event. `TransactionPostedEventConsumer` itself does no such
+deduplication because it has no state or side effect beyond a log line;
+this is explicitly flagged so it's not mistaken for a reference
+implementation of consumer-side idempotency.
+
+**Producer durability.** The Kafka producer is configured with `acks=all`
+plus `enable.idempotence=true` (`application.yml`, env-var-driven like the
+rest of this project's config), so `OutboxRelay`'s synchronous
+`kafkaTemplate.send(...).get(...)` wait genuinely corresponds to
+"acknowledged by all in-sync replicas," not just "handed to the client
+library."
+
+**Operational lesson: single-broker Kafka and internal-topic replication
+factor.** Worth surfacing here because it is exactly the kind of
+non-obvious gotcha that bites anyone self-hosting a single-broker Kafka
+for dev/test, not just this project: Kafka's internal topics
+(`__consumer_offsets`, the transaction-state log) default to
+replication-factor 3, which is unsatisfiable on a single broker. Their
+auto-creation then silently never succeeds, the consumer-group
+coordinator never comes up, and **every** consumer-group-based consumer
+(`@KafkaListener`/`subscribe()` - i.e. every real consumer, including
+`TransactionPostedEventConsumer`) stalls forever with zero records - even
+though messages are demonstrably present on the topic (confirmed via a
+manual, non-group, explicit-partition-assignment consumer during
+diagnosis). This was found by the black-box API test suite, not by code
+review, and fixed via three env vars on the `kafka` service in
+`docker-compose.yml`: `KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1`,
+`KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1`,
+`KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1`. Verified end-to-end: a real
+posted transaction was observed being received by the logging consumer
+after the fix. If you ever stand up your own single-broker Kafka for this
+project (or any project), start with these three set.
+
 ## Scope cuts
 
 Explicitly out of scope for this service, flagged so they are not mistaken
 for oversights:
 
-- **Multi-currency / FX conversion** - `currency` is stored per account as
-  plain ISO 4217 metadata only; there is no conversion, no FX rate table,
-  and no cross-currency transaction support.
-- **Event bus / Kafka / async delivery** - every write is a single
-  synchronous DB transaction; there is no outbox pattern, no event
-  publication, no async processing pipeline.
+- **Live FX rates** - as of Phase 1 of v1 -> v1.1, every entry is converted
+  into a configurable base/reporting currency (`ledger.fx.base-currency`,
+  default USD) and posted transactions can legitimately span multiple
+  currencies (see `V7`-`V9` migrations, `FxRateProvider`, and
+  [Multi-currency & FX](#multi-currency--fx)). What remains out of scope:
+  rates come from a static, seeded `fx_rates` table, not a live external FX
+  API (a documented, deliberately pluggable scope cut - swapping in a live
+  provider is a single new `FxRateProvider` bean); and there is no
+  triangulation/inversion through a third currency or the opposite pair -
+  only pairs explicitly seeded (in both directions) in `fx_rates` are
+  supported.
+- **No base-currency-aware balance/reporting endpoint** - `GET
+  /accounts/{id}/balance` sums an account's entries in that account's own
+  native currency only; there is no endpoint that expresses or totals
+  balances in the base currency across accounts of different currencies.
+  The only FX-aware values exposed today are per-entry
+  (`baseCurrencyAmount`/`fxRateUsed`/`fxRateEffectiveAt` on
+  `EntryResponse`). See [Multi-currency & FX](#multi-currency--fx) for the
+  full reasoning.
+- **Event bus / Kafka - single relay instance, at-least-once, one consumer**
+  - as of Phase 2 of v1 -> v1.1, every posted transaction durably records a
+  `TransactionPosted` event in the same DB transaction as posting (the
+  outbox pattern; `V10` migration, `TransactionWriter`, `OutboxRelay`) and
+  publishes it to a real Kafka broker (see
+  [Event publishing (outbox pattern)](#event-publishing-outbox-pattern)).
+  What remains out of scope: delivery is **at-least-once, not
+  exactly-once** (a consumer must dedupe by `transactionId`); only a single
+  `OutboxRelay` instance runs, with no distributed coordination beyond the
+  `SELECT ... FOR UPDATE SKIP LOCKED` query that would make a future
+  multi-instance relay safe; the Kafka topology is a single broker (KRaft,
+  no Zookeeper, no multi-broker cluster/replication beyond factor 1); and
+  `TransactionPostedEventConsumer` is explicitly a minimal logging
+  proof-of-pipeline consumer, not a real downstream service - no
+  analytics/reporting/notification consumer exists yet.
 - **Authentication / authorization** - there is no auth layer. This is why
   `/actuator/*` exposure is deliberately minimal (see
   [Observability](#observability)) - it's the one place this gap has a

@@ -88,7 +88,13 @@ public abstract class AbstractIntegrationTest {
     void resetLedgerTables() throws SQLException {
         try (Connection conn = dataSource.getConnection();
              Statement statement = conn.createStatement()) {
-            statement.execute("TRUNCATE TABLE entries, transactions, accounts RESTART IDENTITY CASCADE");
+            // outbox_events included (Phase 2, v1 -> v1.1): it has no FK back
+            // to transactions/accounts (aggregate_id is a plain UUID column,
+            // deliberately not a foreign key - see the V10 migration), so it
+            // would never be reset by CASCADE alone and outbox rows from one
+            // test would otherwise leak into and inflate counts in the next.
+            statement.execute(
+                    "TRUNCATE TABLE entries, transactions, accounts, outbox_events RESTART IDENTITY CASCADE");
         }
     }
 }

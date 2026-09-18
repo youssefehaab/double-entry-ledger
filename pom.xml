@@ -90,6 +90,17 @@
             <version>8.0</version>
         </dependency>
 
+        <!-- Phase 2 (v1 -> v1.1): outbox relay publishes to, and the
+             proof-of-pipeline logging consumer reads from, the
+             transaction-posted-events topic that platform-engineer
+             provisioned in docker-compose.yml. spring-kafka is what actually
+             activates the (previously inert) spring.kafka.* properties
+             already present in application.yml. -->
+        <dependency>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka</artifactId>
+        </dependency>
+
         <!-- Test -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -108,9 +119,26 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- Real Kafka broker in a container for outbox-relay/consumer
+             integration tests, matching this project's no-mocks-for-
+             infrastructure convention (see AbstractIntegrationTest for the
+             same rationale applied to Postgres). Version comes from the
+             testcontainers-bom already imported below. -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>kafka</artifactId>
+            <scope>test</scope>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka-test</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

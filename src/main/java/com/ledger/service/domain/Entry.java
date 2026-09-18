@@ -29,6 +29,16 @@ import org.hibernate.annotations.CreationTimestamp;
  *
  * <p>{@code amount} is a {@link BigDecimal}, never a float/double, matching
  * the NUMERIC(19,4) column - see V3 migration.
+ *
+ * <p>{@code baseCurrencyAmount}/{@code fxRateUsed}/{@code fxRateEffectiveAt}
+ * (added in V8) are the durable record of the FX conversion applied to this
+ * entry at post time - always set together, at construction, by whichever
+ * {@link com.ledger.service.service.fx.FxRateProvider} {@code
+ * TransactionWriter} used when this entry was created. Like every other
+ * field on this class they are constructor-only: there is no setter, and
+ * none will ever be added, because entries are append-only (V4) - a later
+ * correction to the {@code fx_rates} table must never be able to reach back
+ * and change what an already-posted entry recorded.
  */
 @Entity
 @Table(name = "entries")
@@ -54,6 +64,19 @@ public class Entry {
     @Column(name = "direction", nullable = false, updatable = false, length = 10)
     private EntryDirection direction;
 
+    // Nullable at the DB level (V8 - see that migration's comment for why:
+    // pre-FX legacy rows have no historically-accurate value to backfill),
+    // but every entry this constructor creates always supplies all three -
+    // enforced below with Objects.requireNonNull, matching amount/direction.
+    @Column(name = "base_currency_amount", updatable = false, precision = 19, scale = 4)
+    private BigDecimal baseCurrencyAmount;
+
+    @Column(name = "fx_rate_used", updatable = false, precision = 19, scale = 8)
+    private BigDecimal fxRateUsed;
+
+    @Column(name = "fx_rate_effective_at", updatable = false)
+    private Instant fxRateEffectiveAt;
+
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
@@ -62,13 +85,26 @@ public class Entry {
         // required by JPA
     }
 
-    public Entry(Transaction transaction, Account account, BigDecimal amount, EntryDirection direction) {
+    public Entry(
+            Transaction transaction,
+            Account account,
+            BigDecimal amount,
+            EntryDirection direction,
+            BigDecimal baseCurrencyAmount,
+            BigDecimal fxRateUsed,
+            Instant fxRateEffectiveAt) {
         this.transaction = Objects.requireNonNull(transaction, "transaction must not be null");
         this.account = Objects.requireNonNull(account, "account must not be null");
         this.amount = Objects.requireNonNull(amount, "amount must not be null");
         this.direction = Objects.requireNonNull(direction, "direction must not be null");
+        this.baseCurrencyAmount = Objects.requireNonNull(baseCurrencyAmount, "baseCurrencyAmount must not be null");
+        this.fxRateUsed = Objects.requireNonNull(fxRateUsed, "fxRateUsed must not be null");
+        this.fxRateEffectiveAt = Objects.requireNonNull(fxRateEffectiveAt, "fxRateEffectiveAt must not be null");
         if (amount.signum() <= 0) {
             throw new IllegalArgumentException("amount must be positive, got: " + amount);
+        }
+        if (baseCurrencyAmount.signum() <= 0) {
+            throw new IllegalArgumentException("baseCurrencyAmount must be positive, got: " + baseCurrencyAmount);
         }
     }
 
@@ -90,6 +126,18 @@ public class Entry {
 
     public EntryDirection getDirection() {
         return direction;
+    }
+
+    public BigDecimal getBaseCurrencyAmount() {
+        return baseCurrencyAmount;
+    }
+
+    public BigDecimal getFxRateUsed() {
+        return fxRateUsed;
+    }
+
+    public Instant getFxRateEffectiveAt() {
+        return fxRateEffectiveAt;
     }
 
     public Instant getCreatedAt() {

@@ -27,7 +27,7 @@ public class OpenApiConfig {
                                 + "both at the application level and, as the ultimate backstop, by a "
                                 + "PostgreSQL deferred constraint trigger. Entries are append-only; "
                                 + "account balances are always derived from entries, never stored.")
-                        .version("0.2.0")
+                        .version("0.3.0")
                         .contact(new Contact().name("Ledger Service Team"))
                         .license(new License().name("Proprietary")));
     }

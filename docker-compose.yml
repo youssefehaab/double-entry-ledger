@@ -17,6 +17,90 @@ services:
       retries: 10
       start_period: 10s
 
+  # Single-node Kafka broker in KRaft mode (combined broker+controller process,
+  # no Zookeeper). Image: apache/kafka - the official Apache Kafka distribution
+  # image, chosen over confluentinc/cp-kafka (adds Confluent-specific tooling
+  # this project doesn't use) and bitnami/kafka (non-standard entrypoint/env
+  # var conventions) because it exposes plain upstream server.properties keys
+  # as KAFKA_* env vars, which keeps this config close to vanilla Kafka docs.
+  # A single broker with a combined broker+controller role is sufficient for
+  # a single-developer portfolio project; no multi-broker cluster is needed.
+  kafka:
+    image: apache/kafka:3.8.0
+    restart: unless-stopped
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      # PLAINTEXT: internal listener used by the `app` container (reaches
+      #   kafka by service name on the docker network).
+      # CONTROLLER: KRaft controller quorum listener, internal-only.
+      # PLAINTEXT_HOST: external listener for host-machine clients (a
+      #   developer's local tooling, or a black-box test suite running
+      #   outside docker) via the mapped host port below.
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:${KAFKA_PORT:-9092}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # Dev convenience fallback only - see the kafka-init one-shot service
+      # below for the authoritative, explicit provisioning of
+      # transaction-posted-events with its intended partition count. If
+      # auto-create ever fires for some other topic, KAFKA_NUM_PARTITIONS
+      # keeps the default partition count consistent with that intent.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 3
+      # Found by the black-box API test suite (TransactionPostedEventApiTest): without these,
+      # every consumer-GROUP-based consumer (subscribe()/@KafkaListener - i.e. every real
+      # consumer, including this app's own TransactionPostedEventConsumer proof-of-pipeline
+      # listener) silently stalls forever. Root cause: Kafka's internal __consumer_offsets and
+      # transaction-state-log topics default to replication-factor 3 - unsatisfiable with a
+      # single broker - so their auto-creation never succeeds, the group coordinator never comes
+      # up, and every group-based poll()/JoinGroup times out with zero records, even though
+      # messages are demonstrably present on the topic (confirmed via a manual, non-group,
+      # explicit-partition-assignment consumer). Manual partition assignment was unaffected
+      # because it never needs a group coordinator. This just extends this file's own already-
+      # stated single-broker "replication factor 1" intent (see the kafka-init service's comment
+      # below) to Kafka's own internal topics, which auto-create with the broker-wide default
+      # otherwise.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Fixed arbitrary cluster ID (any valid 22-char base64url-encoded UUID
+      # works) used to format KRaft storage on first container start.
+      CLUSTER_ID: "gzTkrLCVTay0sdWOHr2nvw"
+    ports:
+      - "${KAFKA_PORT:-9092}:9094"
+    volumes:
+      - ledger_kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  # One-shot topic provisioning: explicit, documented source of truth for the
+  # partition count/replication factor of transaction-posted-events, so it
+  # doesn't depend on the auto-create fallback's timing or defaults.
+  # 3 partitions: enough to allow future consumer-group parallelism for a
+  # portfolio-scope workload without over-provisioning. Replication factor 1:
+  # single broker in this dev/portfolio setup, so no replica placement is
+  # possible beyond 1 - multi-broker replication is out of scope here.
+  kafka-init:
+    image: apache/kafka:3.8.0
+    restart: "no"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092
+      --create --if-not-exists
+      --topic transaction-posted-events
+      --partitions 3
+      --replication-factor 1"
+
   app:
     build:
       context: .
@@ -29,12 +113,19 @@ services:
       DB_USERNAME: ${DB_USERNAME:-ledger}
       DB_PASSWORD: ${DB_PASSWORD:-ledger}
       SERVER_PORT: ${SERVER_PORT:-8080}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     ports:
       - "${SERVER_PORT:-8080}:8080"
     depends_on:
       postgres:
         condition: service_healthy
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
 
 volumes:
   ledger_postgres_data:
     name: ledger_postgres_data
+  ledger_kafka_data:
+    name: ledger_kafka_data

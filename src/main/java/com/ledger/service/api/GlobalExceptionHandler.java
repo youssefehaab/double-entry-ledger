@@ -5,6 +5,7 @@ import com.ledger.service.service.exception.AccountNotFoundException;
 import com.ledger.service.service.exception.IdempotencyKeyConflictException;
 import com.ledger.service.service.exception.TransactionNotFoundException;
 import com.ledger.service.service.exception.UnbalancedTransactionException;
+import com.ledger.service.service.exception.UnsupportedCurrencyPairException;
 import jakarta.validation.ConstraintViolationException;
 import java.util.List;
 import org.slf4j.Logger;
@@ -130,6 +131,20 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
                 .body(ErrorResponse.of(
                         HttpStatus.UNPROCESSABLE_ENTITY.value(), "Unbalanced Transaction", List.of(ex.getMessage())));
+    }
+
+    /**
+     * No FX rate is available to convert one of the request's entries into
+     * the ledger's base currency. Same status as {@link
+     * UnbalancedTransactionException} (422): the request is well-formed and
+     * every referenced account exists, but it cannot be posted as
+     * requested.
+     */
+    @ExceptionHandler(UnsupportedCurrencyPairException.class)
+    public ResponseEntity<ErrorResponse> handleUnsupportedCurrencyPair(UnsupportedCurrencyPairException ex) {
+        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
+                .body(ErrorResponse.of(
+                        HttpStatus.UNPROCESSABLE_ENTITY.value(), "Unsupported Currency Pair", List.of(ex.getMessage())));
     }
 
     /** Same Idempotency-Key reused with a different request body. */

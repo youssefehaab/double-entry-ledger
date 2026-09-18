@@ -25,7 +25,9 @@ class IdempotencyRequestMatcherTest {
     }
 
     private EntryResponse entryResponse(UUID accountId, BigDecimal amount, EntryDirection direction) {
-        return new EntryResponse(UUID.randomUUID(), UUID.randomUUID(), accountId, amount, direction, Instant.now());
+        return new EntryResponse(
+                UUID.randomUUID(), UUID.randomUUID(), accountId, amount, direction,
+                amount, BigDecimal.ONE, Instant.now(), Instant.now());
     }
 
     private EntryRequest entryRequest(UUID accountId, BigDecimal amount, EntryDirection direction) {

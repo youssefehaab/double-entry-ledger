@@ -31,8 +31,75 @@ spring:
     locations: classpath:db/migration
     baseline-on-migrate: false
 
+  kafka:
+    # Points at the `kafka` service in docker-compose.yml by default; override
+    # via KAFKA_BOOTSTRAP_SERVERS for local (non-docker) runs against a
+    # broker on a different host/port.
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      properties:
+        # Strongest durability guarantee: the leader waits for all in-sync
+        # replicas to acknowledge before confirming the write.
+        acks: all
+        # Required alongside acks=all for exactly-once-per-partition
+        # producer semantics (no duplicate/out-of-order writes on retry).
+        enable.idempotence: true
+      # Phase 2 addition: outbox_events.payload is already a JSON string
+      # (serialized explicitly by OutboxEventFactory - see its javadoc), so
+      # OutboxRelay's KafkaTemplate<String, String> just needs the producer
+      # to write plain UTF-8 strings for both the aggregate-id key and the
+      # JSON-text value - no custom (de)serializer needed.
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+    # Phase 2 addition: consumer-side config for
+    # TransactionPostedEventConsumer, the minimal logging proof-of-pipeline
+    # @KafkaListener (see that class's javadoc - it is explicitly not a real
+    # downstream service).
+    consumer:
+      group-id: ${KAFKA_CONSUMER_GROUP_ID:ledger-outbox-proof-of-pipeline}
+      # Every consumer instance should see every event from the start of
+      # the topic the first time it (or a never-before-seen group-id) joins,
+      # rather than silently skipping whatever was already published before
+      # it first connected - appropriate for a proof-of-pipeline consumer
+      # with no persisted downstream state of its own to reconcile.
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+
 server:
   port: ${SERVER_PORT:8080}
+
+ledger:
+  fx:
+    # The ledger's base/reporting currency: every entry's base_currency_amount
+    # (see V8/V9 migrations) is expressed in this currency, regardless of the
+    # entry's own account currency. Used by TransactionWriter, not by
+    # FxRateProvider itself (the provider only converts whatever
+    # (from, to) pair it's asked for). Normalized to uppercase once in
+    # TransactionWriter's constructor (mirroring AccountService.normalizeCurrency)
+    # so this is safely comparable to account currencies regardless of casing.
+    base-currency: ${FX_BASE_CURRENCY:USD}
+  outbox:
+    # Phase 2 (v1 -> v1.1): OutboxRelay tuning. See that class's javadoc for
+    # the sync-send and per-row-transaction rationale these values feed into.
+    topic: ${LEDGER_OUTBOX_TOPIC:transaction-posted-events}
+    # How often the @Scheduled poller ticks. Milliseconds (Spring's
+    # @Scheduled fixedDelayString parses a bare number as milliseconds).
+    poll-interval-ms: ${LEDGER_OUTBOX_POLL_INTERVAL_MS:2000}
+    # Max PENDING rows drained per poll tick (the tick stops early if fewer
+    # than this many are eligible - see OutboxRelay#poll).
+    batch-size: ${LEDGER_OUTBOX_BATCH_SIZE:20}
+    # A row is dead-lettered (PENDING -> FAILED, never retried again) once
+    # it has failed this many publish attempts.
+    max-attempts: ${LEDGER_OUTBOX_MAX_ATTEMPTS:5}
+    # Exponential backoff between retry attempts: base-seconds * 2^attemptCount,
+    # capped at max-seconds. See OutboxEventRepository#lockNextEligibleForRelay
+    # for the exact formula.
+    backoff-base-seconds: ${LEDGER_OUTBOX_BACKOFF_BASE_SECONDS:30}
+    backoff-max-seconds: ${LEDGER_OUTBOX_BACKOFF_MAX_SECONDS:900}
+    # How long OutboxRelay blocks waiting for a synchronous Kafka send
+    # acknowledgment before treating the attempt as failed.
+    kafka-send-timeout-ms: ${LEDGER_OUTBOX_KAFKA_SEND_TIMEOUT_MS:5000}
 
 springdoc:
   api-docs:

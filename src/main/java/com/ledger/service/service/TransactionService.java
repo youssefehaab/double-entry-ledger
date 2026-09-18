@@ -25,10 +25,17 @@ import org.springframework.stereotype.Service;
  * <h2>Idempotency mechanism (read-before-write + UNIQUE-constraint backstop)</h2>
  * <ol>
  *   <li><b>First request with a new key:</b> {@code findByIdempotencyKey}
- *       returns empty, the entries are validated (balance, then account
- *       existence), and the transaction + entries are inserted in one DB
+ *       returns empty, and the transaction + entries are inserted in one DB
  *       transaction. No write is attempted before the read-before-write
- *       check and the balance pre-check both pass.</li>
+ *       check passes. Balance validation ({@link TransactionBalanceValidator})
+ *       and account-existence validation both still happen before any
+ *       {@code Entry} row is written, but have moved inside {@link
+ *       TransactionWriter#createAndPersist} (as of Phase 1 of v1 -&gt; v1.1,
+ *       multi-currency support) rather than happening here first: a
+ *       currency-aware balance check needs each entry's account currency,
+ *       which is only known once accounts are loaded/locked inside that
+ *       method - see its javadoc and {@link TransactionBalanceValidator}'s
+ *       for the full reasoning.</li>
  *   <li><b>Replay with the same key, same body:</b> {@code
  *       findByIdempotencyKey} finds the row from step 1 immediately - the
  *       write path ({@link TransactionWriter#createAndPersist}) is never
@@ -77,11 +84,12 @@ public class TransactionService {
             return resolveAgainstExisting(existing.get(), request, idempotencyKey);
         }
 
-        // App-level pre-check, before any DB write is attempted: pure
-        // in-memory arithmetic, no I/O. The DB-level deferred constraint
-        // trigger (V5 migration) remains the ultimate backstop regardless.
-        TransactionBalanceValidator.validateBalanced(request.entries());
-
+        // Balance validation happens inside transactionWriter.createAndPersist
+        // now (see TransactionWriter/TransactionBalanceValidator javadoc for
+        // why: it requires each entry's account currency, which is only
+        // known once accounts are loaded there). The DB-level deferred
+        // constraint trigger (V9 migration) remains the ultimate backstop
+        // regardless.
         try {
             TransactionResponse created = transactionWriter.createAndPersist(request, idempotencyKey);
             return TransactionOutcome.created(created);

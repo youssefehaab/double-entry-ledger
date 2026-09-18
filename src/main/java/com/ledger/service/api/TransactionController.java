@@ -60,9 +60,13 @@ public class TransactionController {
     @Operation(summary = "Create and post a balanced transaction",
             description = "Validates that entries balance (422 if not) and that every referenced "
                     + "account exists (404 if not), then atomically creates the transaction (status "
-                    + "POSTED) and its entries. Idempotent via the required Idempotency-Key header: "
-                    + "replaying the same key with the same body returns the original result (200) "
-                    + "without reprocessing; reusing the same key with a different body returns 409.")
+                    + "POSTED) and its entries. Every entry is also converted into the ledger's "
+                    + "base/reporting currency (see ledger.fx.base-currency) at post time; if no FX "
+                    + "rate is available for one of an entry's account currency and the base "
+                    + "currency, this also returns 422. Idempotent via the required Idempotency-Key "
+                    + "header: replaying the same key with the same body returns the original result "
+                    + "(200) without reprocessing; reusing the same key with a different body returns "
+                    + "409.")
     @ApiResponse(responseCode = "201", description = "Transaction created and posted")
     @ApiResponse(responseCode = "200", description = "Idempotent replay: identical request already processed under this key")
     @ApiResponse(responseCode = "400", description = "Missing/blank Idempotency-Key header, or request body "
@@ -73,7 +77,8 @@ public class TransactionController {
             content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
     @ApiResponse(responseCode = "409", description = "Idempotency-Key was already used with a different request body",
             content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
-    @ApiResponse(responseCode = "422", description = "Entries do not balance (sum(DEBIT) != sum(CREDIT))",
+    @ApiResponse(responseCode = "422", description = "Entries do not balance (sum(DEBIT) != sum(CREDIT)), "
+            + "or no FX rate is available to convert one of the entries into the base currency",
             content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
     public ResponseEntity<TransactionResponse> createTransaction(
             @Valid @RequestBody CreateTransactionRequest request,

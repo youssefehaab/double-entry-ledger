@@ -712,10 +712,23 @@ for oversights:
   `OutboxRelay` instance runs, with no distributed coordination beyond the
   `SELECT ... FOR UPDATE SKIP LOCKED` query that would make a future
   multi-instance relay safe; the Kafka topology is a single broker (KRaft,
-  no Zookeeper, no multi-broker cluster/replication beyond factor 1); and
+  no Zookeeper, no multi-broker cluster/replication beyond factor 1);
   `TransactionPostedEventConsumer` is explicitly a minimal logging
   proof-of-pipeline consumer, not a real downstream service - no
-  analytics/reporting/notification consumer exists yet.
+  analytics/reporting/notification consumer exists yet; and a
+  dead-lettered (`FAILED`) event has no recovery or alerting tooling - no
+  admin endpoint to inspect or requeue it, no alert on dead-letter
+  accumulation; recovery today means manual DB intervention (see
+  [Event publishing (outbox pattern)](#event-publishing-outbox-pattern)
+  for the bounded-retry mechanics that lead to this state).
+- **No custom outbox/business metrics** - `/actuator/metrics` exposes only
+  the stock JVM and HTTP-request metrics that
+  `spring-boot-starter-actuator` auto-configures (see
+  [Observability](#observability)); there is no custom Micrometer gauge
+  for the outbox backlog (count of `PENDING` rows) or any other
+  ledger-specific metric. This was scoped in an earlier planning pass and
+  deliberately dropped rather than delivered - flagged here so it doesn't
+  read as an accidental gap.
 - **Authentication / authorization** - there is no auth layer. This is why
   `/actuator/*` exposure is deliberately minimal (see
   [Observability](#observability)) - it's the one place this gap has a

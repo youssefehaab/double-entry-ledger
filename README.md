@@ -329,6 +329,13 @@ behavior; the outbox and relay are entirely internal.
   JVM metrics (heap, GC, threads) and HTTP server request metrics
   (`http.server.requests`, tagged by URI/method/status) with no additional
   code, via `spring-boot-starter-actuator` auto-configuration.
+- **`ledger.outbox.backlog.size`** - a custom Micrometer gauge reporting
+  the current count of `PENDING` rows in `outbox_events` (the outbox
+  backlog), exposed at `/actuator/metrics/ledger.outbox.backlog.size`. It
+  is evaluated live on every scrape/read - it genuinely re-runs the
+  `COUNT` query each time, via Micrometer's `Gauge.builder(name,
+  stateObject, valueFunction)` overload - not a value cached or computed
+  once at startup.
 - Only `health` and `metrics` are exposed
   (`management.endpoints.web.exposure.include`) - a deliberate allow-list,
   not `*`: there is no authentication in front of these endpoints in this
@@ -721,12 +728,18 @@ for oversights:
   accumulation; recovery today means manual DB intervention (see
   [Event publishing (outbox pattern)](#event-publishing-outbox-pattern)
   for the bounded-retry mechanics that lead to this state).
-- **No custom outbox/business metrics** - `/actuator/metrics` exposes only
-  the stock JVM and HTTP-request metrics that
-  `spring-boot-starter-actuator` auto-configures (see
-  [Observability](#observability)); there is no custom Micrometer gauge
-  for the outbox backlog (count of `PENDING` rows) or any other
-  ledger-specific metric. This was scoped in an earlier planning pass and
+- **No custom business metrics beyond the outbox backlog gauge** - the
+  outbox-backlog gap once flagged here has been closed:
+  `ledger.outbox.backlog.size` is a live Micrometer gauge over the count
+  of `PENDING` rows in `outbox_events`, exposed at
+  `/actuator/metrics/ledger.outbox.backlog.size` (see
+  [Observability](#observability)). What remains out of scope: there is
+  no metric for dead-lettered/`FAILED` outbox-row accumulation (see the
+  event-bus scope cut above), no FX conversion volume/failure metrics,
+  and no per-currency transaction volume metrics - beyond the one backlog
+  gauge, `/actuator/metrics` still exposes only the stock JVM and
+  HTTP-request metrics that `spring-boot-starter-actuator`
+  auto-configures. This was scoped in an earlier planning pass and
   deliberately dropped rather than delivered - flagged here so it doesn't
   read as an accidental gap.
 - **Authentication / authorization** - there is no auth layer. This is why

@@ -1,6 +1,7 @@
 package com.ledger.service.repository;
 
 import com.ledger.service.domain.OutboxEvent;
+import com.ledger.service.domain.OutboxStatus;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -65,4 +66,6 @@ public interface OutboxEventRepository extends JpaRepository<OutboxEvent, UUID> 
     Optional<OutboxEvent> lockNextEligibleForRelay(
             @Param("baseBackoffSeconds") long baseBackoffSeconds,
             @Param("maxBackoffSeconds") long maxBackoffSeconds);
+
+    long countByStatus(OutboxStatus status);
 }
